@@ -1,0 +1,17 @@
+node_modules/
+out/
+dist/
+logs/
+
+.env
+.env.*
+
+*.sqlite
+*.sqlite-*
+profiles/
+uploads/
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
