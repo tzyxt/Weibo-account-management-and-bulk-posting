@@ -1153,7 +1153,8 @@ th {
 }
 
 .comment-settings textarea,
-.comment-reply-toggle {
+.comment-reply-toggle,
+.link-extractor {
   grid-column: 1 / -1;
 }
 
@@ -1164,6 +1165,29 @@ th {
 
 .comment-settings textarea[rows="3"] {
   min-height: 76px;
+}
+
+.link-extractor {
+  display: grid;
+  gap: 8px;
+}
+
+.link-extractor textarea {
+  min-height: 72px;
+}
+
+.extracted-link-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.extracted-link-list .compact-button {
+  max-width: 100%;
+  justify-content: flex-start;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .field-row {

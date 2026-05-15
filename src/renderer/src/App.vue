@@ -85,6 +85,7 @@ const autoCommentEnabled = ref(false);
 const commentContent = ref('');
 const commentDelaySeconds = ref(0);
 const commentAccountId = ref<number | null>(null);
+const linkExtractInput = ref('');
 const replyCommentEnabled = ref(false);
 const replyCommentContent = ref('');
 const replyCommentDelaySeconds = ref(0);
@@ -101,6 +102,7 @@ const selectedAccount = computed(() => accounts.value.find((account) => account.
 const onlineAccounts = computed(() => accounts.value.filter((account) => account.status === 'online'));
 const postableAccounts = computed(() => accounts.value.filter((account) => (account.platform || 'weibo') === 'weibo' && account.status !== 'expired'));
 const commentableAccounts = computed(() => accounts.value.filter((account) => (account.platform || 'weibo') === 'weibo' && account.status === 'online'));
+const extractedCommentLinks = computed(() => extractCommentLinks(linkExtractInput.value));
 const composedTopics = computed(() => {
   const fromContent = Array.from(postContent.value.matchAll(/#([^#\s]{1,30})#/g)).map((match) => normalizeTopic(match[1]));
   return Array.from(new Set(fromContent));
@@ -1017,6 +1019,37 @@ function localDateTimeToIso(value: string): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+function normalizeSharedLink(rawUrl: string): string {
+  const url = rawUrl.replace(/[，。；、,.;!?！？）)\]】>》"'“”‘’]+$/g, '');
+  if (/pan\.baidu\.com/i.test(url)) {
+    return `D:${url}`;
+  }
+  if (/pan\.quark\.cn/i.test(url)) {
+    return `K:${url}`;
+  }
+  return url;
+}
+
+function extractCommentLinks(value: string): string[] {
+  const matches = value.match(/https?:\/\/[^\s<>"'，。；、]+/gi) || [];
+  return Array.from(new Set(matches.map((url) => normalizeSharedLink(url))));
+}
+
+function appendToFirstComment(value: string): void {
+  const nextValue = value.trim();
+  if (!nextValue) {
+    return;
+  }
+  autoCommentEnabled.value = true;
+  commentContent.value = commentContent.value.trim()
+    ? `${commentContent.value.trim()}\n${nextValue}`
+    : nextValue;
+}
+
+function appendExtractedLinksToFirstComment(): void {
+  appendToFirstComment(extractedCommentLinks.value.join('\n'));
+}
+
 async function createPostTasks(): Promise<void> {
   errorMessage.value = '';
   const content = cleanPostContent(postContent.value);
@@ -1045,6 +1078,7 @@ async function createPostTasks(): Promise<void> {
     commentContent.value = '';
     commentDelaySeconds.value = 0;
     commentAccountId.value = null;
+    linkExtractInput.value = '';
     replyCommentEnabled.value = false;
     replyCommentContent.value = '';
     replyCommentDelaySeconds.value = 0;
@@ -1690,6 +1724,23 @@ watch([superTopicSearch, activeSuperTopicTab], () => {
           </label>
           <div v-if="autoCommentEnabled" class="comment-settings">
             <textarea v-model="commentContent" placeholder="评论内容" rows="4" />
+            <div class="link-extractor">
+              <textarea v-model="linkExtractInput" placeholder="粘贴网盘分享文案，自动提取 http 链接" rows="3" />
+              <div v-if="extractedCommentLinks.length" class="extracted-link-list">
+                <button
+                  v-for="link in extractedCommentLinks"
+                  :key="link"
+                  class="ghost-button compact-button"
+                  type="button"
+                  @click="appendToFirstComment(link)"
+                >
+                  {{ link }}
+                </button>
+                <button class="primary-button compact-button" type="button" @click="appendExtractedLinksToFirstComment">
+                  全部加入评论
+                </button>
+              </div>
+            </div>
             <input v-model.number="commentDelaySeconds" min="0" type="number" />
             <select v-model.number="commentAccountId">
               <option :value="null">默认发帖账号评论</option>
