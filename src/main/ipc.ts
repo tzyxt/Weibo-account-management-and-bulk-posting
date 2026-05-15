@@ -391,9 +391,61 @@ async function submitCommentInWindow(window: BrowserWindow, content: string, rep
     })()
   `)) as boolean;
   await delay(1200);
+  if (replyToContent && !ready) {
+    throw new Error('没有找到目标评论的回复入口，已停止，避免发成一级评论');
+  }
   const wrote = (await window.webContents.executeJavaScript(`
     (() => {
       const content = ${JSON.stringify(content)};
+      const replyToContent = ${JSON.stringify(replyToContent)};
+      const isVisible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width && rect.height && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      if (replyToContent) {
+        const active = document.activeElement;
+        if (active instanceof HTMLTextAreaElement && isVisible(active)) {
+          const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+          setter?.call(active, content);
+          active.focus();
+          active.dispatchEvent(new Event('input', { bubbles: true }));
+          active.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+        if (active instanceof HTMLElement && active.isContentEditable && isVisible(active)) {
+          active.focus();
+          active.textContent = content;
+          active.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: content }));
+          return true;
+        }
+        const focusedInput = Array.from(document.querySelectorAll('textarea, [contenteditable="true"]'))
+          .reverse()
+          .find((element) => {
+            if (!isVisible(element)) return false;
+            const placeholder = element.getAttribute('placeholder') || '';
+            const aria = element.getAttribute('aria-label') || '';
+            return /回复|鍥炲/i.test(placeholder + aria);
+          });
+        if (!focusedInput) {
+          return false;
+        }
+        if (focusedInput instanceof HTMLTextAreaElement) {
+          const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+          setter?.call(focusedInput, content);
+          focusedInput.focus();
+          focusedInput.dispatchEvent(new Event('input', { bubbles: true }));
+          focusedInput.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+        if (focusedInput instanceof HTMLElement) {
+          focusedInput.focus();
+          focusedInput.textContent = content;
+          focusedInput.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: content }));
+          return true;
+        }
+        return false;
+      }
       const textareas = Array.from(document.querySelectorAll('textarea'));
       const textarea = textareas.reverse().find((element) => {
         const rect = element.getBoundingClientRect();
@@ -429,15 +481,43 @@ async function submitCommentInWindow(window: BrowserWindow, content: string, rep
   const clicked = (await window.webContents.executeJavaScript(`
     (() => {
       const text = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+      const replyToContent = ${JSON.stringify(replyToContent)};
+      const isSubmit = (element) => {
+        const value = text(element.textContent || element.getAttribute('aria-label') || element.getAttribute('title') || '');
+        return value === '评论' || value === '发送' || value === '回复' || value === '璇勮' || value === '鍙戦€?' || value === '鍥炲';
+      };
+      const clickElement = (element) => {
+        const rect = element.getBoundingClientRect();
+        const options = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+        element.dispatchEvent(new MouseEvent('mousedown', options));
+        element.dispatchEvent(new MouseEvent('mouseup', options));
+        element.dispatchEvent(new MouseEvent('click', options));
+      };
+      if (replyToContent) {
+        const input = document.activeElement;
+        if (!(input instanceof HTMLElement)) return false;
+        let node = input.parentElement;
+        for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+          const buttons = Array.from(node.querySelectorAll('button, [role="button"], a, div')).reverse();
+          const submit = buttons.find((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.width && rect.height && isSubmit(element);
+          });
+          if (submit) {
+            clickElement(submit);
+            return true;
+          }
+        }
+        return false;
+      }
       const candidates = Array.from(document.querySelectorAll('button, [role="button"], a, div')).reverse();
       const submit = candidates.find((element) => {
         const rect = element.getBoundingClientRect();
         if (!rect.width || !rect.height) return false;
-        const value = text(element.textContent || element.getAttribute('aria-label') || element.getAttribute('title') || '');
-        return value === '评论' || value === '发送' || value === '回复';
+        return isSubmit(element);
       });
       if (!submit) return false;
-      submit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      clickElement(submit);
       return true;
     })()
   `)) as boolean;
