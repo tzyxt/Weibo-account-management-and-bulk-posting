@@ -1,5 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, Menu, shell, type WebContents } from 'electron';
-import { basename, extname, join } from 'node:path';
+import { extname, join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { AppDatabase } from './db/database';
 import { registerIpc } from './ipc';
@@ -16,15 +16,31 @@ const imageExtensionByType: Record<string, string> = {
   'image/bmp': '.bmp'
 };
 
+function timestampImageName(extension: string): string {
+  const now = new Date();
+  const pad = (value: number, length = 2): string => String(value).padStart(length, '0');
+  const timestamp = [
+    now.getFullYear(),
+    pad(now.getMonth() + 1),
+    pad(now.getDate()),
+    '-',
+    pad(now.getHours()),
+    pad(now.getMinutes()),
+    pad(now.getSeconds()),
+    '-',
+    pad(now.getMilliseconds(), 3)
+  ].join('');
+  return `${timestamp}${extension}`;
+}
+
 function filenameFromImageUrl(url: string, contentType?: string | null): string {
   const extensionFromType = contentType ? imageExtensionByType[contentType.split(';')[0].trim().toLowerCase()] : '';
   try {
     const parsed = new URL(url);
-    const name = basename(parsed.pathname).replace(/[<>:"/\\|?*]+/g, '_') || 'weibo-image';
-    const extension = extname(name) || extensionFromType || '.jpg';
-    return extname(name) ? name : `${name}${extension}`;
+    const extension = extname(parsed.pathname) || extensionFromType || '.jpg';
+    return timestampImageName(extension);
   } catch {
-    return `weibo-image${extensionFromType || '.jpg'}`;
+    return timestampImageName(extensionFromType || '.jpg');
   }
 }
 
