@@ -1,6 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, Menu, shell, type WebContents } from 'electron';
 import { extname, join } from 'node:path';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { AppDatabase } from './db/database';
 import { registerIpc } from './ipc';
 
@@ -44,17 +44,19 @@ function filenameFromImageUrl(url: string, contentType?: string | null): string 
   }
 }
 
-async function saveImageFromUrl(url: string, contents: WebContents): Promise<void> {
-  if (!url) {
-    return;
-  }
+function todayFolderName(): string {
+  const now = new Date();
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
 
+async function loadImageFromUrl(url: string, contents: WebContents): Promise<{ data: Buffer; contentType: string }> {
   let data: Buffer;
   let contentType = '';
   if (url.startsWith('data:')) {
     const match = url.match(/^data:([^;,]+)?(;base64)?,(.*)$/);
     if (!match) {
-      return;
+      throw new Error('无法解析图片数据');
     }
     contentType = match[1] || 'image/png';
     data = Buffer.from(decodeURIComponent(match[3]), match[2] ? 'base64' : 'utf8');
@@ -72,6 +74,25 @@ async function saveImageFromUrl(url: string, contents: WebContents): Promise<voi
     contentType = response.headers.get('content-type') || '';
     data = Buffer.from(await response.arrayBuffer());
   }
+  return { data, contentType };
+}
+
+async function quickSaveImageFromUrl(url: string, contents: WebContents): Promise<void> {
+  if (!url) {
+    return;
+  }
+  const { data, contentType } = await loadImageFromUrl(url, contents);
+  const folder = join(app.getPath('pictures'), 'WeiboAccountManager', todayFolderName());
+  await mkdir(folder, { recursive: true });
+  await writeFile(join(folder, filenameFromImageUrl(url, contentType)), data);
+}
+
+async function saveImageFromUrl(url: string, contents: WebContents): Promise<void> {
+  if (!url) {
+    return;
+  }
+
+  const { data, contentType } = await loadImageFromUrl(url, contents);
 
   const ownerWindow = BrowserWindow.fromWebContents(contents) ?? BrowserWindow.getFocusedWindow();
   const options = {
@@ -102,6 +123,14 @@ function registerContextMenus(): void {
         return;
       }
       Menu.buildFromTemplate([
+        {
+          label: '快速保存图片',
+          click: () => {
+            void quickSaveImageFromUrl(imageUrl, contents).catch((error) => {
+              dialog.showErrorBox('快速保存图片失败', error instanceof Error ? error.message : '无法保存图片');
+            });
+          }
+        },
         {
           label: '保存图片',
           click: () => {
