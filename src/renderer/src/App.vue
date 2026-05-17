@@ -1601,7 +1601,6 @@ watch([superTopicSearch, activeSuperTopicTab], () => {
             class="weibo-webview"
             :src="accountHomeUrl(selectedAccount)"
             :partition="selectedPartition"
-            allowpopups
             @did-stop-loading="scheduleLoggedInProfileSync"
             @dom-ready="scheduleLoggedInProfileSync"
             @did-navigate="updateBrowserUrl"

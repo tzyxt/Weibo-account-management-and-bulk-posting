@@ -87,6 +87,15 @@ async function saveImageFromUrl(url: string, contents: WebContents): Promise<voi
 
 function registerContextMenus(): void {
   app.on('web-contents-created', (_event, contents) => {
+    contents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:\/\//i.test(url) && contents !== mainWindow?.webContents) {
+        void contents.loadURL(url);
+      } else if (/^https?:\/\//i.test(url)) {
+        void shell.openExternal(url);
+      }
+      return { action: 'deny' };
+    });
+
     contents.on('context-menu', (_menuEvent, params) => {
       const imageUrl = params.srcURL;
       if (params.mediaType !== 'image' || !imageUrl) {
@@ -136,11 +145,6 @@ function createWindow(): void {
   });
   mainWindow.setMenuBarVisibility(false);
   mainWindow.setAutoHideMenuBar(true);
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
-    return { action: 'deny' };
-  });
 
   if (process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
