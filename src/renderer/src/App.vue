@@ -194,6 +194,13 @@ type WebviewElement = HTMLElement & {
   loadURL: (url: string) => Promise<void> | void;
 };
 
+type WebviewNewWindowEvent = Event & {
+  url?: string;
+  detail?: {
+    url?: string;
+  };
+};
+
 function isNavigationAbort(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
     return false;
@@ -448,6 +455,23 @@ function loadWebviewUrl(webview: WebviewElement, url: string): void {
       console.error(error);
     }
   });
+}
+
+function openPopupInCurrentWebview(event: WebviewNewWindowEvent): void {
+  event.preventDefault();
+  const url = event.url || event.detail?.url || '';
+  if (!/^https?:\/\//i.test(url)) {
+    return;
+  }
+  const webview = getWeiboWebview();
+  if (!webview) {
+    return;
+  }
+  browserUrl.value = url;
+  if (selectedAccountId.value) {
+    accountBrowserUrls.value[selectedAccountId.value] = url;
+  }
+  loadWebviewUrl(webview, url);
 }
 
 function loadBrowserUrl(): void {
@@ -1601,6 +1625,8 @@ watch([superTopicSearch, activeSuperTopicTab], () => {
             class="weibo-webview"
             :src="accountHomeUrl(selectedAccount)"
             :partition="selectedPartition"
+            allowpopups
+            @new-window="openPopupInCurrentWebview"
             @did-stop-loading="scheduleLoggedInProfileSync"
             @dom-ready="scheduleLoggedInProfileSync"
             @did-navigate="updateBrowserUrl"
