@@ -307,7 +307,11 @@ export class AppDatabase {
     if (!payload.accountIds.length) {
       throw new Error('至少选择一个账号');
     }
-    if (!payload.content.trim()) {
+    const accountContentMap = new Map(
+      (payload.accountContents || []).map((item) => [Number(item.accountId), String(item.content || '').trim()])
+    );
+    const contentForAccount = (accountId: number): string => accountContentMap.get(accountId) || payload.content.trim();
+    if (!payload.accountIds.every((accountId) => contentForAccount(Number(accountId)))) {
       throw new Error('微博正文不能为空');
     }
     if (payload.autoCommentEnabled && !payload.commentContent.trim()) {
@@ -336,6 +340,10 @@ export class AppDatabase {
     }
 
     const timestamp = now();
+    const parentContent =
+      payload.accountIds.length > 1 && accountContentMap.size
+        ? `多账号不同文案（${payload.accountIds.length} 个账号）`
+        : payload.content.trim();
     const insertTask = this.db.prepare(
       `INSERT INTO post_task
        (parent_task_id, account_id, content, topics, images, auto_comment_enabled, comment_content,
@@ -350,7 +358,7 @@ export class AppDatabase {
           ? insertTask.run(
               null,
               null,
-              payload.content.trim(),
+              parentContent,
               JSON.stringify(payload.topics),
               JSON.stringify(payload.images),
               payload.autoCommentEnabled ? 1 : 0,
@@ -367,11 +375,13 @@ export class AppDatabase {
       const parentId = parentInfo ? Number(parentInfo.lastInsertRowid) : null;
 
       const taskIds = payload.accountIds.map((accountId) => {
+        const taskContent = contentForAccount(Number(accountId));
+        const taskTopics = Array.from(new Set(Array.from(taskContent.matchAll(/#([^#\s]{1,30})#/g)).map((match) => match[1].trim()).filter(Boolean)));
         const info = insertTask.run(
           parentId,
           accountId,
-          payload.content.trim(),
-          JSON.stringify(payload.topics),
+          taskContent,
+          JSON.stringify(taskTopics.length ? taskTopics : payload.topics),
           JSON.stringify(payload.images),
           payload.autoCommentEnabled ? 1 : 0,
           payload.commentContent.trim() || null,

@@ -13,6 +13,7 @@ import {
   Image as ImageIcon,
   Loader2,
   MessageCircle,
+  Pin,
   Plus,
   RefreshCw,
   Send,
@@ -57,8 +58,11 @@ const selectedPartition = ref('');
 const accountPanelCollapsed = ref(false);
 const accountViewVersion = ref(0);
 const accountWebviewSyncing = ref(false);
+const accountRefreshingId = ref<number | null>(null);
 const browserUrl = ref('https://weibo.com/');
+const webviewSrc = ref('https://weibo.com/');
 const accountBrowserUrls = ref<Record<number, string>>({});
+const pinnedAccountIds = ref<number[]>([]);
 const accountPlatformMenuOpen = ref(false);
 const accountProfileRedirectedAt = ref<Record<number, number>>({});
 const accountSearch = ref('');
@@ -69,6 +73,9 @@ const groupRemark = ref('');
 const expandedGroupIds = ref<number[]>([]);
 const selectedPostAccountIds = ref<number[]>([]);
 const postContent = ref('');
+const perAccountPostEnabled = ref(false);
+const accountPostContents = ref<Record<number, string>>({});
+const postPublishMode = ref<'serial' | 'parallel'>('serial');
 const postTopics = ref('');
 const postTextarea = ref<HTMLTextAreaElement | null>(null);
 const postImages = ref<string[]>([]);
@@ -102,6 +109,7 @@ const selectedAccount = computed(() => accounts.value.find((account) => account.
 const onlineAccounts = computed(() => accounts.value.filter((account) => account.status === 'online'));
 const postableAccounts = computed(() => accounts.value.filter((account) => (account.platform || 'weibo') === 'weibo' && account.status !== 'expired'));
 const commentableAccounts = computed(() => accounts.value.filter((account) => (account.platform || 'weibo') === 'weibo' && account.status === 'online'));
+const selectedPostAccounts = computed(() => postableAccounts.value.filter((account) => selectedPostAccountIds.value.includes(account.id)));
 const extractedCommentLinks = computed(() => extractCommentLinks(linkExtractInput.value));
 const composedTopics = computed(() => {
   const fromContent = Array.from(postContent.value.matchAll(/#([^#\s]{1,30})#/g)).map((match) => normalizeTopic(match[1]));
@@ -118,6 +126,13 @@ const filteredAccounts = computed(() => {
       (account.group_name || '').toLowerCase().includes(keyword);
     const matchesStatus = accountStatusFilter.value === 'all' || account.status === accountStatusFilter.value;
     return matchesKeyword && matchesStatus;
+  }).sort((a, b) => {
+    const aPinned = pinnedAccountIds.value.includes(a.id);
+    const bPinned = pinnedAccountIds.value.includes(b.id);
+    if (aPinned !== bPinned) {
+      return aPinned ? -1 : 1;
+    }
+    return a.id - b.id;
   });
 });
 
@@ -205,9 +220,18 @@ function isNavigationAbort(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
     return false;
   }
-  const value = error as { code?: string; errno?: number; message?: string };
-  return value.errno === -3 || value.code === 'ERR_ABORTED' || /ERR_ABORTED|\(-3\)/.test(value.message || '');
+  const value = error as { code?: string; errno?: number; message?: string; reason?: unknown };
+  if (isNavigationAbort(value.reason)) {
+    return true;
+  }
+  return value.errno === -3 || value.code === 'ERR_ABORTED' || /ERR_ABORTED|\(-3\)|GUEST_VIEW_MANAGER_CALL/.test(value.message || '');
 }
+
+window.addEventListener('unhandledrejection', (event) => {
+  if (isNavigationAbort(event.reason)) {
+    event.preventDefault();
+  }
+});
 
 function accountDisplayName(account: WeiboAccount): string {
   if (account.nickname && account.nickname !== '新微博账号' && account.nickname !== '新百度网盘账号') {
@@ -431,6 +455,13 @@ function updateBrowserUrl(): void {
   }
 }
 
+function setActivePage(page: PageKey): void {
+  if (activePage.value === 'accounts') {
+    updateBrowserUrl();
+  }
+  activePage.value = page;
+}
+
 function goBrowserBack(): void {
   const webview = getWeiboWebview();
   if (webview?.canGoBack()) {
@@ -450,6 +481,7 @@ function reloadBrowser(): void {
 }
 
 function loadWebviewUrl(webview: WebviewElement, url: string): void {
+  webviewSrc.value = url;
   void Promise.resolve(webview.loadURL(url)).catch((error) => {
     if (!isNavigationAbort(error)) {
       console.error(error);
@@ -468,6 +500,7 @@ function openPopupInCurrentWebview(event: WebviewNewWindowEvent): void {
     return;
   }
   browserUrl.value = url;
+  webviewSrc.value = url;
   if (selectedAccountId.value) {
     accountBrowserUrls.value[selectedAccountId.value] = url;
   }
@@ -485,6 +518,7 @@ function loadBrowserUrl(): void {
   }
   const nextUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
   browserUrl.value = nextUrl;
+  webviewSrc.value = nextUrl;
   if (selectedAccountId.value) {
     accountBrowserUrls.value[selectedAccountId.value] = nextUrl;
   }
@@ -506,10 +540,9 @@ async function clearSelectedAccountCache(): Promise<void> {
 
 async function refreshAllAndSyncSelected(): Promise<void> {
   await refreshAll();
-  scheduleLoggedInProfileSync();
 }
 
-async function syncLoggedInProfileFromWebview(): Promise<void> {
+async function syncLoggedInProfileFromWebview(allowRedirect = false): Promise<void> {
   const account = selectedAccount.value;
   if (!account || accountWebviewSyncing.value) {
     return;
@@ -884,14 +917,14 @@ async function syncLoggedInProfileFromWebview(): Promise<void> {
       if (
         profile.profileUrl &&
         !currentUrl.includes(profile.profileUrl.replace(/\/$/, '')) &&
+        allowRedirect &&
         now - lastRedirectAt > 8000
       ) {
         accountProfileRedirectedAt.value[account.id] = now;
         browserUrl.value = profile.profileUrl;
+        webviewSrc.value = profile.profileUrl;
         accountBrowserUrls.value[account.id] = profile.profileUrl;
         loadWebviewUrl(webview, profile.profileUrl);
-      } else if (profile.clickedProfileEntry) {
-        scheduleLoggedInProfileSync();
       }
       return;
     }
@@ -914,22 +947,27 @@ async function syncLoggedInProfileFromWebview(): Promise<void> {
   }
 }
 
-function scheduleLoggedInProfileSync(): void {
-  [600, 1800, 3600, 6500].forEach((delay) => {
-    window.setTimeout(() => {
-      syncLoggedInProfileFromWebview();
-    }, delay);
-  });
+async function refreshAccountProfile(id: number): Promise<void> {
+  errorMessage.value = '';
+  accountRefreshingId.value = id;
+  try {
+    if (selectedAccountId.value !== id) {
+      await selectAccount(id);
+      await nextTick();
+    }
+    await syncLoggedInProfileFromWebview(false);
+    await refreshAll();
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '刷新账号资料失败';
+  } finally {
+    accountRefreshingId.value = null;
+  }
 }
 
-function needsProfileSync(): boolean {
-  const account = selectedAccount.value;
-  return Boolean(
-    account &&
-      accountPlatform(account) === 'weibo' &&
-      account.status !== 'expired' &&
-      (account.status === 'online' || account.status === 'logging_in')
-  );
+function togglePinnedAccount(id: number): void {
+  pinnedAccountIds.value = pinnedAccountIds.value.includes(id)
+    ? pinnedAccountIds.value.filter((accountId) => accountId !== id)
+    : [id, ...pinnedAccountIds.value];
 }
 
 async function refreshAll(): Promise<void> {
@@ -980,6 +1018,7 @@ async function selectAccount(id: number): Promise<void> {
   selectedPartition.value = await window.weiboApp.accounts.getPartition(id);
   const account = accounts.value.find((item) => item.id === id);
   browserUrl.value = accountBrowserUrls.value[id] || (account ? accountHomeUrl(account) : 'https://weibo.com/');
+  webviewSrc.value = browserUrl.value;
 }
 
 async function deleteAccount(id: number): Promise<void> {
@@ -1030,9 +1069,12 @@ async function deleteGroup(id: number): Promise<void> {
 }
 
 function togglePostAccount(id: number): void {
-  selectedPostAccountIds.value = selectedPostAccountIds.value.includes(id)
-    ? selectedPostAccountIds.value.filter((accountId) => accountId !== id)
-    : [...selectedPostAccountIds.value, id];
+  if (selectedPostAccountIds.value.includes(id)) {
+    selectedPostAccountIds.value = selectedPostAccountIds.value.filter((accountId) => accountId !== id);
+    return;
+  }
+  selectedPostAccountIds.value = [...selectedPostAccountIds.value, id];
+  accountPostContents.value[id] = accountPostContents.value[id] || postContent.value;
 }
 
 function localDateTimeToIso(value: string): string | null {
@@ -1077,11 +1119,19 @@ function appendExtractedLinksToFirstComment(): void {
 async function createPostTasks(): Promise<void> {
   errorMessage.value = '';
   const content = cleanPostContent(postContent.value);
-  const topics = Array.from(new Set(Array.from(content.matchAll(/#([^#\s]{1,30})#/g)).map((match) => normalizeTopic(match[1]))));
+  const accountContents = perAccountPostEnabled.value
+    ? selectedPostAccountIds.value.map((id) => ({
+        accountId: Number(id),
+        content: cleanPostContent(accountPostContents.value[id] || '')
+      }))
+    : [];
+  const topicSource = perAccountPostEnabled.value ? accountContents.map((item) => item.content).join('\n') : content;
+  const topics = Array.from(new Set(Array.from(topicSource.matchAll(/#([^#\s]{1,30})#/g)).map((match) => normalizeTopic(match[1]))));
   const nextScheduledAt = localDateTimeToIso(scheduledAt.value);
   const payload: CreatePostPayload = {
     accountIds: selectedPostAccountIds.value.map((id) => Number(id)),
     content,
+    accountContents: perAccountPostEnabled.value ? accountContents : undefined,
     topics,
     images: postImages.value.map((image) => String(image)),
     autoCommentEnabled: Boolean(autoCommentEnabled.value),
@@ -1097,6 +1147,8 @@ async function createPostTasks(): Promise<void> {
   try {
     const tasks = await window.weiboApp.posts.createBatch(payload);
     postContent.value = '';
+    accountPostContents.value = {};
+    perAccountPostEnabled.value = false;
     postTopics.value = '';
     postImages.value = [];
     commentContent.value = '';
@@ -1109,8 +1161,21 @@ async function createPostTasks(): Promise<void> {
     replyCommentAccountId.value = null;
     scheduledAt.value = '';
     autoCommentEnabled.value = false;
-    for (const task of tasks.filter((item) => item.account_id && !item.scheduled_at)) {
-      await window.weiboApp.posts.autoPublish(task.id);
+    const publishableTasks = tasks.filter((item) => item.account_id && !item.scheduled_at);
+    if (postPublishMode.value === 'parallel') {
+      const results = await Promise.all(publishableTasks.map((task) => window.weiboApp.posts.autoPublish(task.id)));
+      const failed = results.filter((result) => result.status === 'failed');
+      if (failed.length) {
+        errorMessage.value = `${failed.length} 个发帖任务失败，失败窗口已保留`;
+      }
+    } else {
+      for (const task of publishableTasks) {
+        const result = await window.weiboApp.posts.autoPublish(task.id);
+        if (result.status === 'failed') {
+          errorMessage.value = result.errorMessage || '发帖任务失败，失败窗口已保留';
+          break;
+        }
+      }
     }
     await refreshAll();
   } catch (error) {
@@ -1255,6 +1320,9 @@ async function copyText(text: string | null): Promise<void> {
 function selectGroupForPost(groupId: number): void {
   const ids = accounts.value.filter((account) => account.group_id === groupId && account.status !== 'expired').map((account) => account.id);
   selectedPostAccountIds.value = Array.from(new Set([...selectedPostAccountIds.value, ...ids]));
+  for (const id of ids) {
+    accountPostContents.value[id] = accountPostContents.value[id] || postContent.value;
+  }
 }
 
 let superTopicSearchTimer: number | null = null;
@@ -1267,16 +1335,11 @@ onMounted(() => {
     }
     await refreshAll();
     accountViewVersion.value += 1;
-    scheduleLoggedInProfileSync();
+    await syncLoggedInProfileFromWebview(false);
   });
   window.weiboApp.posts.onScheduledTaskUpdated(() => {
     refreshAll();
   });
-  window.setInterval(() => {
-    if (activePage.value === 'accounts' && needsProfileSync()) {
-      scheduleLoggedInProfileSync();
-    }
-  }, 5000);
 });
 
 watch(
@@ -1318,7 +1381,7 @@ watch([superTopicSearch, activeSuperTopicTab], () => {
           class="nav-item"
           :class="{ active: activePage === page.key }"
           type="button"
-          @click="activePage = page.key"
+          @click="setActivePage(page.key)"
         >
           <component :is="page.icon" :size="18" />
           <span>{{ page.label }}</span>
@@ -1547,13 +1610,16 @@ watch([superTopicSearch, activeSuperTopicTab], () => {
           </div>
 
           <div class="account-list">
-            <button
+            <div
               v-for="account in filteredAccounts"
               :key="account.id"
-              type="button"
               class="account-row"
               :class="{ selected: selectedAccountId === account.id }"
+              role="button"
+              tabindex="0"
               @click="selectAccount(account.id)"
+              @keydown.enter.prevent="selectAccount(account.id)"
+              @keydown.space.prevent="selectAccount(account.id)"
             >
               <div class="avatar-wrap">
                 <img v-if="account.avatar" class="avatar image-avatar" :src="account.avatar" alt="" />
@@ -1569,12 +1635,34 @@ watch([superTopicSearch, activeSuperTopicTab], () => {
                   <span>{{ account.group_name || '未分组' }} · {{ accountStatusLabel(account) }}</span>
                 </span>
               </div>
-            </button>
+              <div class="account-row-actions">
+                <button
+                  class="icon-action"
+                  type="button"
+                  :title="pinnedAccountIds.includes(account.id) ? '取消置顶' : '置顶'"
+                  @click.stop="togglePinnedAccount(account.id)"
+                >
+                  <Pin :size="15" />
+                </button>
+                <button
+                  class="icon-action danger"
+                  type="button"
+                  title="删除"
+                  @click.stop="deleteAccount(account.id)"
+                >
+                  <Trash2 :size="15" />
+                </button>
+              </div>
+            </div>
             <p v-if="accounts.length === 0" class="empty">还没有账号，点击右上角添加微博或百度网盘。</p>
             <p v-else-if="filteredAccounts.length === 0" class="empty">没有匹配的账号。</p>
           </div>
 
           <div v-if="selectedAccount" class="account-quick-actions">
+            <button class="ghost-button" type="button" :disabled="accountRefreshingId === selectedAccount.id" @click="refreshAccountProfile(selectedAccount.id)">
+              <RefreshCw :size="16" :class="{ spin: accountRefreshingId === selectedAccount.id }" />
+              <span>刷新资料</span>
+            </button>
             <span class="account-actions-title">账号管理</span>
             <button class="ghost-button" type="button" @click="openLoginWindow(selectedAccount.id)">人工登录</button>
             <button class="danger-button delete-account-button" type="button" @click="deleteAccount(selectedAccount.id)">
@@ -1608,7 +1696,6 @@ watch([superTopicSearch, activeSuperTopicTab], () => {
               v-model="browserUrl"
               class="address-input"
               @keyup.enter="loadBrowserUrl"
-              @blur="loadBrowserUrl"
             />
             <button class="toolbar-text-button" type="button" @click="clearSelectedAccountCache">
               <Eraser :size="15" />
@@ -1623,12 +1710,10 @@ watch([superTopicSearch, activeSuperTopicTab], () => {
             v-if="selectedAccount && selectedPartition"
             :key="`${selectedAccount.id}-${selectedPartition}-${accountViewVersion}`"
             class="weibo-webview"
-            :src="accountHomeUrl(selectedAccount)"
+            :src="webviewSrc"
             :partition="selectedPartition"
             allowpopups
             @new-window="openPopupInCurrentWebview"
-            @did-stop-loading="scheduleLoggedInProfileSync"
-            @dom-ready="scheduleLoggedInProfileSync"
             @did-navigate="updateBrowserUrl"
             @did-navigate-in-page="updateBrowserUrl"
           />
@@ -1739,15 +1824,53 @@ watch([superTopicSearch, activeSuperTopicTab], () => {
           <div v-if="composedTopics.length" class="selected-topics">
             <span v-for="topic in composedTopics" :key="topic">#{{ topic }}#</span>
           </div>
-          <label class="switch-row">
-            <input v-model="autoCommentEnabled" type="checkbox" />
-            <span>发帖成功后自动评论</span>
-          </label>
           <label class="field-row">
             <span>指定发布时间</span>
             <input v-model="scheduledAt" type="datetime-local" />
           </label>
-          <div v-if="autoCommentEnabled" class="comment-settings">
+          <label class="field-row">
+            <span>执行方式</span>
+            <select v-model="postPublishMode">
+              <option value="serial">串行：发完一个再发下一个</option>
+              <option value="parallel">并发：同时打开多个账号发</option>
+            </select>
+          </label>
+          <button class="primary-button" type="button" @click="createPostTasks">
+            <Send :size="16" />
+            <span>创建任务</span>
+          </button>
+        </section>
+
+        <section class="panel per-account-post-panel">
+          <div class="panel-title">
+            <Users :size="18" />
+            <h2>发布配置</h2>
+          </div>
+          <label class="switch-row">
+            <input v-model="perAccountPostEnabled" type="checkbox" />
+            <span>按账号分别填写文案</span>
+          </label>
+          <div v-if="perAccountPostEnabled" class="per-account-post-list">
+            <label v-for="account in selectedPostAccounts" :key="account.id" class="per-account-post-item">
+              <span>{{ account.nickname || accountFallbackName(account) }}</span>
+              <textarea
+                v-model="accountPostContents[account.id]"
+                maxlength="2000"
+                rows="4"
+                placeholder="这个账号要发布的文案"
+              />
+            </label>
+            <p v-if="selectedPostAccounts.length === 0" class="empty">先选择要发帖的账号。</p>
+          </div>
+          <div v-else class="per-account-post-placeholder">
+            <span v-for="account in selectedPostAccounts" :key="account.id">{{ account.nickname || accountFallbackName(account) }}</span>
+            <p v-if="selectedPostAccounts.length === 0" class="empty">先选择要发帖的账号。</p>
+          </div>
+          <label class="switch-row">
+            <input v-model="autoCommentEnabled" type="checkbox" />
+            <span>发帖成功后自动评论</span>
+          </label>
+          <div v-if="autoCommentEnabled" class="comment-settings side-comment-settings">
             <textarea v-model="commentContent" placeholder="评论内容" rows="4" />
             <div class="link-extractor">
               <textarea v-model="linkExtractInput" placeholder="粘贴网盘分享文案，自动提取 http 链接" rows="3" />
@@ -1788,13 +1911,9 @@ watch([superTopicSearch, activeSuperTopicTab], () => {
               </select>
             </template>
           </div>
-          <button class="primary-button" type="button" @click="createPostTasks">
-            <Send :size="16" />
-            <span>创建任务</span>
-          </button>
         </section>
 
-        <section class="panel wide">
+        <section class="panel wide post-task-panel">
           <div class="panel-title">
             <ClipboardList :size="18" />
             <h2>发帖任务</h2>

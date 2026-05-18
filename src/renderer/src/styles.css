@@ -493,7 +493,8 @@ th {
 
 .account-row {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: center;
   gap: 12px;
   width: 100%;
   padding: 10px;
@@ -502,6 +503,7 @@ th {
   color: #17201b;
   text-align: left;
   background: #ffffff;
+  cursor: pointer;
 }
 
 .avatar-wrap {
@@ -525,6 +527,44 @@ th {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.account-row-actions {
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+
+.account-row:hover .account-row-actions,
+.account-row:focus-within .account-row-actions,
+.account-row.selected .account-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.icon-action {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid #dbe4de;
+  border-radius: 7px;
+  color: #50635a;
+  background: #ffffff;
+}
+
+.icon-action:hover {
+  border-color: #147a63;
+  color: #147a63;
+  background: #edf8f3;
+}
+
+.icon-action.danger:hover {
+  border-color: #d15c55;
+  color: #b43f39;
+  background: #fff1ef;
 }
 
 .account-platform-line {
@@ -657,6 +697,7 @@ th {
 }
 
 .account-actions-title {
+  order: -1;
   grid-column: 1 / -1;
   color: #68766f;
   font-size: 12px;
@@ -1076,6 +1117,73 @@ th {
   background: #eef8f3;
 }
 
+.per-account-post-list {
+  display: grid;
+  gap: 10px;
+  max-height: 520px;
+  overflow: auto;
+}
+
+.per-account-post-panel {
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.per-account-post-item {
+  display: grid;
+  gap: 6px;
+}
+
+.per-account-post-item span {
+  color: #50635a;
+  font-size: 13px;
+}
+
+.per-account-post-item textarea {
+  min-height: 82px;
+  resize: vertical;
+}
+
+.per-account-post-placeholder {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.per-account-post-placeholder span {
+  padding: 6px 9px;
+  border: 1px solid #d5ded8;
+  border-radius: 999px;
+  color: #3f5148;
+  background: #f8fbf9;
+  font-size: 12px;
+}
+
+.post-task-panel {
+  padding: 12px;
+}
+
+.post-task-panel .panel-title {
+  margin-bottom: 8px;
+}
+
+.post-task-panel .table-scroll {
+  max-height: 300px;
+}
+
+.post-task-panel th,
+.post-task-panel td {
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.post-task-panel .status-pill {
+  min-height: 22px;
+  padding: 0 8px;
+}
+
 .execution-panel {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
@@ -1150,6 +1258,10 @@ th {
 
 .comment-settings {
   grid-template-columns: 110px minmax(150px, 0.8fr);
+}
+
+.side-comment-settings {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .comment-settings textarea,

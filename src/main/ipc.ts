@@ -31,6 +31,7 @@ interface AutoPublishPayload {
   accountId: number;
   content: string;
   images: string[];
+  likeAfterPublish?: boolean;
 }
 
 interface AutoCommentPayload {
@@ -217,6 +218,9 @@ async function waitForComposer(window: BrowserWindow): Promise<void> {
           const rect = element.getBoundingClientRect();
           if (!rect.width || !rect.height) return false;
           const value = text(element.textContent || element.getAttribute('aria-label') || element.getAttribute('title') || '');
+          const disabled = element.getAttribute('aria-disabled') === 'true' || element.getAttribute('disabled') !== null || /disabled/i.test(String(element.className || ''));
+          if (disabled) return false;
+          if (value === '\\u53d1\\u9001' || value === '\\u53d1\\u5e03' || value.includes('\\u53d1\\u9001') || value.includes('\\u53d1\\u5e03')) return true;
           return value === '登录' || value === '登录/注册';
         });
         const composer = document.querySelector('textarea[placeholder*="新鲜事"], textarea[placeholder*="分享"], textarea');
@@ -275,9 +279,32 @@ async function setUploadFiles(window: BrowserWindow, files: string[]): Promise<v
   await delay(Math.max(2500, files.length * 1200));
 }
 
-async function readLatestWeiboUrl(window: BrowserWindow): Promise<string | null> {
+async function readLatestWeiboUrl(window: BrowserWindow, content = ''): Promise<string | null> {
   return window.webContents.executeJavaScript(`
     (() => {
+      const targetContent = ${JSON.stringify(content)};
+      const normalize = (value) => (value || '').replace(/\\s+/g, '').trim();
+      const target = normalize(targetContent).slice(0, 36);
+      const readUrls = (root) => Array.from(root.querySelectorAll('a[href]'))
+        .map((anchor) => anchor.href || anchor.getAttribute('href') || '')
+        .filter((href) => /weibo\\.com\\/\\d+\\/[A-Za-z0-9]+/.test(href) || /weibo\\.com\\/status\\//.test(href));
+      if (target) {
+        const cards = Array.from(document.querySelectorAll('article, main div, div'))
+          .filter((element) => {
+            const text = normalize(element.textContent || '');
+            const rect = element.getBoundingClientRect();
+            return rect.width > 260 && rect.height > 80 && text.includes(target);
+          })
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.height * ar.width - br.height * br.width;
+          });
+        for (const card of cards) {
+          const urls = readUrls(card);
+          if (urls.length) return urls[0];
+        }
+      }
       const anchors = Array.from(document.querySelectorAll('a[href]'));
       const urls = anchors
         .map((anchor) => anchor.href || anchor.getAttribute('href') || '')
@@ -527,6 +554,774 @@ async function submitCommentInWindow(window: BrowserWindow, content: string, rep
   await delay(3500);
 }
 
+async function submitCommentInWindowV2(window: BrowserWindow, content: string, replyToContent: string | null = null): Promise<void> {
+  const ready = (await window.webContents.executeJavaScript(`
+    (() => {
+      const text = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+      const compact = (value) => text(value)
+        .replace(/[\\u200b-\\u200f\\ufeff]/g, '')
+        .replace(/[🔗]/g, '')
+        .replace(/\\s+/g, '')
+        .trim();
+      const replyToContent = ${JSON.stringify(replyToContent)};
+      const visible = (element) => {
+        if (!element || !(element instanceof Element)) return false;
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const realTarget = (element) => element?.closest?.('button, [role="button"], a[href], div, span') || element;
+      const clickElement = (element) => {
+        const target = realTarget(element);
+        if (!target || !visible(target)) return false;
+        const rect = target.getBoundingClientRect();
+        const options = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+        target.dispatchEvent(new MouseEvent('mouseover', options));
+        target.dispatchEvent(new MouseEvent('mousedown', options));
+        target.dispatchEvent(new MouseEvent('mouseup', options));
+        target.dispatchEvent(new MouseEvent('click', options));
+        return true;
+      };
+      const clickPoint = (x, y) => {
+        const target = document.elementFromPoint(x, y)?.closest('button, [role="button"], a, div, span, svg, use');
+        if (!target || !visible(target)) return false;
+        const options = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+        target.dispatchEvent(new MouseEvent('mouseover', options));
+        target.dispatchEvent(new MouseEvent('mousedown', options));
+        target.dispatchEvent(new MouseEvent('mouseup', options));
+        target.dispatchEvent(new MouseEvent('click', options));
+        return true;
+      };
+      const labelOf = (element) => text(element.textContent || element.getAttribute('aria-label') || element.getAttribute('title') || '');
+      const isCommentAction = (element) => {
+        const value = labelOf(element);
+        return value === '\\u56de\\u590d' || value.includes('\\u56de\\u590d') || value === '\\u8bc4\\u8bba' || value.includes('\\u8bc4\\u8bba');
+      };
+      const hasPrimaryEditor = () => Array.from(document.querySelectorAll('textarea, [contenteditable="true"]'))
+        .some((element) => {
+          if (!visible(element)) return false;
+          const placeholder = element.getAttribute('placeholder') || '';
+          const aria = element.getAttribute('aria-label') || '';
+          const rect = element.getBoundingClientRect();
+          const actionRows = Array.from(document.querySelectorAll('div, footer, section'))
+            .filter((rowElement) => {
+              if (!visible(rowElement)) return false;
+              const value = text(rowElement.textContent || '');
+              const row = rowElement.getBoundingClientRect();
+              return value.includes('\\u8f6c\\u53d1') &&
+                value.includes('\\u8bc4\\u8bba') &&
+                (value.includes('\\u8d5e') || value.includes('\\u5206\\u4eab') || /\\b\\d+\\b/.test(value)) &&
+                row.top > 180 &&
+                row.bottom < rect.top + 12 &&
+                rect.top <= row.bottom + 180 &&
+                rect.left >= row.left - 80 &&
+                rect.right <= row.right + 80;
+            });
+          return actionRows.length > 0 &&
+            (/\\u8bc4\\u8bba|\\u56de\\u590d|\\u8bf4\\u70b9\\u4ec0\\u4e48/.test(placeholder + aria) ||
+            text(element.textContent || '').includes('\\u53d1\\u5e03\\u4f60\\u7684\\u8bc4\\u8bba'));
+        });
+      const clickableSelector = 'button, [role="button"], a[href], [aria-label], [title], svg, use, div, span';
+      if (replyToContent) {
+        const rawTarget = text(replyToContent);
+        const variants = Array.from(new Set([
+          rawTarget,
+          rawTarget.replace(/https?:\\/\\/\\S+/ig, '\\u7f51\\u9875\\u94fe\\u63a5'),
+          rawTarget.replace(/https?:\\/\\/\\S+/ig, ''),
+          rawTarget.replace(/[🔗]/g, ''),
+          rawTarget.replace(/[DK]:\\s*/i, '').replace(/https?:\\/\\/\\S+/ig, '\\u7f51\\u9875\\u94fe\\u63a5'),
+          rawTarget.match(/^[DK]:/i) ? rawTarget.slice(0, 2) + '\\u7f51\\u9875\\u94fe\\u63a5' : ''
+        ].filter(Boolean))).map(compact).filter((value) => value.length >= 2);
+        const matchesTarget = (value) => {
+          const normalized = compact(value);
+          if (!normalized) return false;
+          return variants.some((variant) => normalized.includes(variant) || variant.includes(normalized));
+        };
+        const candidates = Array.from(document.querySelectorAll('article, li, div'))
+          .filter((element) => {
+            if (!visible(element) || !matchesTarget(element.textContent || '')) return false;
+            const rect = element.getBoundingClientRect();
+            return rect.top > 70 && rect.bottom < window.innerHeight + 120 && rect.height >= 28 && rect.height <= 260 && rect.width >= 240;
+          })
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.height * ar.width - br.height * br.width;
+          });
+        const clickReplyInRow = (candidate) => {
+          candidate.scrollIntoView({ block: 'center', inline: 'nearest' });
+          const row = candidate.getBoundingClientRect();
+          const labelled = Array.from(candidate.querySelectorAll(clickableSelector)).reverse().find((element) => {
+            if (!visible(element) || !isCommentAction(element)) return false;
+            const rect = element.getBoundingClientRect();
+            return rect.left >= row.left - 2 && rect.right <= row.right + 8 && rect.top >= row.top - 8 && rect.bottom <= row.bottom + 28;
+          });
+          if (labelled) return clickElement(labelled);
+          const globalActions = Array.from(document.querySelectorAll(clickableSelector))
+            .filter((element) => {
+              if (!visible(element)) return false;
+              const rect = element.getBoundingClientRect();
+              const centerY = rect.top + rect.height / 2;
+              const centerX = rect.left + rect.width / 2;
+              return centerY >= row.top - 8 && centerY <= row.bottom + 28 && centerX > row.left + Math.min(260, row.width * 0.55) && centerX < row.right + 16 && rect.width <= 80 && rect.height <= 80;
+            });
+          if (globalActions.length) {
+            const sortedRight = [...globalActions].sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left);
+            return clickElement(sortedRight[1] || sortedRight[0]);
+          }
+          const probePoints = [
+            [row.right - 70, row.top + row.height / 2],
+            [row.right - 70, row.bottom - 24],
+            [row.right - 110, row.top + row.height / 2],
+            [row.right - 110, row.bottom - 24]
+          ];
+          for (const [x, y] of probePoints) {
+            const target = document.elementFromPoint(x, y)?.closest(clickableSelector);
+            if (target && clickElement(target)) return true;
+          }
+          return false;
+        };
+        for (const candidate of candidates) {
+          if (clickReplyInRow(candidate)) return true;
+        }
+        return false;
+      }
+      if (hasPrimaryEditor()) return true;
+      const buttons = Array.from(document.querySelectorAll('button, [role="button"], a, div, span'));
+      const commentButton = buttons.find((element) => visible(element) && isCommentAction(element));
+      return clickElement(commentButton);
+    })()
+  `)) as boolean;
+  await delay(replyToContent ? 1800 : 1200);
+  if (replyToContent && !ready) {
+    throw new Error('没有找到目标评论的回复入口，已停止，避免发成一级评论');
+  }
+
+  const wrote = (await window.webContents.executeJavaScript(`
+    (() => {
+      const content = ${JSON.stringify(content)};
+      const replyToContent = ${JSON.stringify(replyToContent)};
+      const isVisible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width && rect.height && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const findPrimaryCommentInput = () => {
+        const rows = Array.from(document.querySelectorAll('div, footer, section'))
+          .filter((rowElement) => {
+            if (!isVisible(rowElement)) return false;
+            const value = (rowElement.textContent || '').replace(/\\s+/g, ' ').trim();
+            const row = rowElement.getBoundingClientRect();
+            return value.includes('\\u8f6c\\u53d1') &&
+              value.includes('\\u8bc4\\u8bba') &&
+              (value.includes('\\u8d5e') || value.includes('\\u5206\\u4eab') || /\\b\\d+\\b/.test(value)) &&
+              row.top > 180 &&
+              row.top < Math.min(window.innerHeight * 0.72, 620) &&
+              row.width >= 520 &&
+              row.height >= 34 &&
+              row.height <= 96;
+          })
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.height * ar.width - br.height * br.width;
+          });
+        for (const rowElement of rows) {
+          const row = rowElement.getBoundingClientRect();
+          const input = Array.from(document.querySelectorAll('textarea, [contenteditable="true"]'))
+            .find((element) => {
+              if (!isVisible(element)) return false;
+              const rect = element.getBoundingClientRect();
+              const placeholder = element.getAttribute('placeholder') || '';
+              const aria = element.getAttribute('aria-label') || '';
+              return rect.top >= row.bottom - 8 &&
+                rect.top <= row.bottom + 180 &&
+                rect.left >= row.left - 80 &&
+                rect.right <= row.right + 80 &&
+                (/\\u8bc4\\u8bba|\\u56de\\u590d|\\u8bf4\\u70b9\\u4ec0\\u4e48/.test(placeholder + aria) || document.querySelectorAll('textarea').length === 1);
+            });
+          if (input) return input;
+        }
+        return null;
+      };
+      const writeInput = (input) => {
+        if (input instanceof HTMLTextAreaElement) {
+          const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+          setter?.call(input, content);
+          input.focus();
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+        if (input instanceof HTMLElement) {
+          input.focus();
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(input);
+          range.deleteContents();
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+          document.execCommand('insertText', false, content);
+          if (!text(input.textContent || '').includes(content)) {
+            input.textContent = content;
+          }
+          input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: content }));
+          input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: content }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+        return false;
+      };
+      if (replyToContent) {
+        const active = document.activeElement;
+        if ((active instanceof HTMLTextAreaElement || active?.isContentEditable) && isVisible(active)) {
+          return writeInput(active);
+        }
+        const focusedInput = Array.from(document.querySelectorAll('textarea, [contenteditable="true"]'))
+          .reverse()
+          .find((element) => {
+            if (!isVisible(element)) return false;
+            const placeholder = element.getAttribute('placeholder') || '';
+            const aria = element.getAttribute('aria-label') || '';
+            return /\\u56de\\u590d|\\u8bc4\\u8bba/.test(placeholder + aria);
+          });
+        return writeInput(focusedInput);
+      }
+      const input = findPrimaryCommentInput() || Array.from(document.querySelectorAll('textarea, [contenteditable="true"]'))
+        .reverse()
+        .find((element) => {
+          if (!isVisible(element)) return false;
+          const placeholder = element.getAttribute('placeholder') || '';
+          const rect = element.getBoundingClientRect();
+          return rect.top > 260 && (/\\u8bc4\\u8bba|\\u56de\\u590d|\\u8bf4\\u70b9\\u4ec0\\u4e48/.test(placeholder) || document.querySelectorAll('textarea').length === 1);
+        });
+      return writeInput(input);
+    })()
+  `)) as boolean;
+  if (!wrote) {
+    throw new Error(ready ? '没有找到评论输入框' : '没有找到评论入口');
+  }
+
+  await delay(1000);
+  const clicked = (await window.webContents.executeJavaScript(`
+    (() => {
+      const text = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+      const replyToContent = ${JSON.stringify(replyToContent)};
+      const isSubmit = (element) => {
+        const value = text(element.textContent || element.getAttribute('aria-label') || element.getAttribute('title') || '');
+        return value === '\\u8bc4\\u8bba' || value === '\\u53d1\\u9001' || value === '\\u56de\\u590d' || value.includes('\\u8bc4\\u8bba') || value.includes('\\u53d1\\u9001') || value.includes('\\u56de\\u590d');
+      };
+      const visible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width && rect.height && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const clickElement = (element) => {
+        const target = element?.closest?.('button, [role="button"], a, div, span') || element;
+        if (!target || !visible(target)) return false;
+        const rect = target.getBoundingClientRect();
+        const options = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+        target.dispatchEvent(new MouseEvent('mouseover', options));
+        target.dispatchEvent(new MouseEvent('mousedown', options));
+        target.dispatchEvent(new MouseEvent('mouseup', options));
+        target.dispatchEvent(new MouseEvent('click', options));
+        return true;
+      };
+      const clickPoint = (x, y) => {
+        const target = document.elementFromPoint(x, y)?.closest('button, [role="button"], a, div, span');
+        if (!target || !visible(target)) return false;
+        const options = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+        target.dispatchEvent(new MouseEvent('mouseover', options));
+        target.dispatchEvent(new MouseEvent('mousedown', options));
+        target.dispatchEvent(new MouseEvent('mouseup', options));
+        target.dispatchEvent(new MouseEvent('click', options));
+        return true;
+      };
+      const findPrimaryCommentInput = () => {
+        const rows = Array.from(document.querySelectorAll('div, footer, section'))
+          .filter((rowElement) => {
+            if (!visible(rowElement)) return false;
+            const value = text(rowElement.textContent || '');
+            const row = rowElement.getBoundingClientRect();
+            return value.includes('\\u8f6c\\u53d1') &&
+              value.includes('\\u8bc4\\u8bba') &&
+              (value.includes('\\u8d5e') || value.includes('\\u5206\\u4eab') || /\\b\\d+\\b/.test(value)) &&
+              row.top > 180 &&
+              row.top < Math.min(window.innerHeight * 0.72, 620) &&
+              row.width >= 520 &&
+              row.height >= 34 &&
+              row.height <= 96;
+          })
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.height * ar.width - br.height * br.width;
+          });
+        for (const rowElement of rows) {
+          const row = rowElement.getBoundingClientRect();
+          const input = Array.from(document.querySelectorAll('textarea, [contenteditable="true"]'))
+            .find((element) => {
+              if (!visible(element)) return false;
+              const rect = element.getBoundingClientRect();
+              return rect.top >= row.bottom - 8 &&
+                rect.top <= row.bottom + 180 &&
+                rect.left >= row.left - 80 &&
+                rect.right <= row.right + 80;
+            });
+          if (input) return input;
+        }
+        return null;
+      };
+      const detailInput = findPrimaryCommentInput();
+      const activeInput = !replyToContent && detailInput
+        ? detailInput
+        : document.activeElement instanceof HTMLElement && visible(document.activeElement)
+          ? document.activeElement
+          : Array.from(document.querySelectorAll('textarea, [contenteditable="true"]')).reverse().find((element) => visible(element));
+      const clickNearestSubmit = () => {
+        if (!(activeInput instanceof HTMLElement)) return false;
+        const inputRect = activeInput.getBoundingClientRect();
+        let node = activeInput.parentElement;
+        for (let depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
+          const containerRect = node.getBoundingClientRect();
+          const buttons = Array.from(node.querySelectorAll('button, [role="button"], a, div, span')).reverse();
+          const submit = buttons.find((element) => {
+            if (!visible(element) || !isSubmit(element)) return false;
+            const rect = element.getBoundingClientRect();
+            return rect.left >= inputRect.left &&
+              rect.right <= containerRect.right + 8 &&
+              rect.top >= inputRect.top - 8 &&
+              rect.top <= inputRect.bottom + 96 &&
+              rect.width >= 34 &&
+              rect.height >= 24;
+          });
+          if (submit && clickElement(submit)) return true;
+        }
+        const points = [
+          [Math.min(inputRect.right - 44, window.innerWidth - 64), inputRect.bottom + 40],
+          [Math.min(inputRect.right - 64, window.innerWidth - 84), inputRect.bottom + 40],
+          [Math.min(inputRect.right - 44, window.innerWidth - 64), inputRect.bottom + 28]
+        ];
+        for (const [x, y] of points) {
+          if (clickPoint(x, y)) return true;
+        }
+        return false;
+      };
+      if (replyToContent) {
+        const input = activeInput;
+        if (!(input instanceof HTMLElement)) return false;
+        let node = input.parentElement;
+        for (let depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
+          const buttons = Array.from(node.querySelectorAll('button, [role="button"], a, div')).reverse();
+          const submit = buttons.find((element) => visible(element) && isSubmit(element));
+          if (submit) {
+            clickElement(submit);
+            return true;
+          }
+        }
+        return false;
+      }
+      if (clickNearestSubmit()) return true;
+      const candidates = Array.from(document.querySelectorAll('button, [role="button"], a, div')).reverse();
+      const submit = candidates.find((element) => visible(element) && isSubmit(element));
+      if (!submit) return false;
+      return clickElement(submit);
+    })()
+  `)) as boolean;
+  if (!clicked) {
+    throw new Error('没有找到评论提交按钮');
+  }
+  await delay(3500);
+}
+
+async function likeWeiboInWindow(window: BrowserWindow, content = ''): Promise<boolean> {
+  return (await window.webContents.executeJavaScript(`
+    (async () => {
+      const targetContent = ${JSON.stringify(content)};
+      const text = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+      const compact = (value) => text(value).replace(/\\s+/g, '').trim();
+      const visible = (element) => {
+        if (!element || !(element instanceof Element)) return false;
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const labelOf = (element) => text(element.textContent || element.getAttribute('aria-label') || element.getAttribute('title') || '');
+      const elementText = (element) => text(element.textContent || element.getAttribute('aria-label') || element.getAttribute('title') || element.innerHTML || '');
+      const looksLiked = (element) => {
+        const value = labelOf(element);
+        const ariaPressed = element.getAttribute('aria-pressed');
+        const ariaChecked = element.getAttribute('aria-checked');
+        const className = String(element.className || '');
+        return value.includes('\\u5df2\\u8d5e') ||
+          value.includes('\\u53d6\\u6d88\\u8d5e') ||
+          ariaPressed === 'true' ||
+          ariaChecked === 'true' ||
+          /liked|active|selected/i.test(className);
+      };
+      const isLikeAction = (element) => {
+        const value = elementText(element);
+        if (value.includes('\\u8bc4\\u8bba') || value.includes('\\u8f6c\\u53d1') || value.includes('\\u9605\\u8bfb')) return false;
+        if (value === '\\u8d5e' || value.includes('\\u8d5e')) return true;
+        return /woo-font--like|icon_like|like/i.test(value);
+      };
+      const clickElement = (element) => {
+        const target = element.closest?.('button, [role="button"], a, div, span') || element;
+        if (!visible(target) || looksLiked(target) || isOrangeLike(target)) return false;
+        const rect = target.getBoundingClientRect();
+        const options = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+        target.dispatchEvent(new MouseEvent('mouseover', options));
+        target.dispatchEvent(new MouseEvent('mousedown', options));
+        target.dispatchEvent(new MouseEvent('mouseup', options));
+        target.dispatchEvent(new MouseEvent('click', options));
+        return true;
+      };
+      const clickPoint = (x, y) => {
+        const target = document.elementFromPoint(x, y)?.closest('button, [role="button"], a, div, span, svg, use');
+        if (!target || !visible(target) || looksLiked(target) || isOrangeLike(target)) return false;
+        const options = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+        target.dispatchEvent(new MouseEvent('mouseover', options));
+        target.dispatchEvent(new MouseEvent('mousedown', options));
+        target.dispatchEvent(new MouseEvent('mouseup', options));
+        target.dispatchEvent(new MouseEvent('click', options));
+        return true;
+      };
+      const isOrangeLike = (element) => {
+        const style = window.getComputedStyle(element);
+        const colorText = [style.color, style.fill, style.stroke].join(' ');
+        const className = String(element.className || '');
+        return /orange|liked|active|selected/i.test(className) ||
+          /255,\\s*(130|131|132|133|134|135|136|137|138|139|140|141|142|143|144|145|146|147|148|149|150)/.test(colorText) ||
+          /#ff/i.test(colorText);
+      };
+      const didLike = (root) => Array.from(root.querySelectorAll('*')).some((element) => visible(element) && isOrangeLike(element));
+      const clickPrecise = async (element, root) => {
+        const targets = [
+          element,
+          element.querySelector?.('svg'),
+          element.querySelector?.('use'),
+          ...Array.from(element.querySelectorAll?.('i, svg, use, span') || [])
+        ].filter(Boolean);
+        for (const target of targets) {
+          if (!clickElement(target)) continue;
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          if (didLike(root)) return true;
+        }
+        return false;
+      };
+      window.scrollTo({ top: 0, behavior: 'instant' });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const detailActionRows = Array.from(document.querySelectorAll('div, footer, section'))
+        .filter((element) => {
+          if (!visible(element)) return false;
+          const value = text(element.textContent || '');
+          const rect = element.getBoundingClientRect();
+          return value.includes('\\u8f6c\\u53d1') &&
+            value.includes('\\u8bc4\\u8bba') &&
+            value.includes('\\u8d5e') &&
+            !value.includes('\\u53d1\\u5e03\\u4f60\\u7684\\u8bc4\\u8bba') &&
+            rect.top > 260 &&
+            rect.top < Math.min(window.innerHeight * 0.7, 560) &&
+            rect.width >= 520 &&
+            rect.height >= 34 &&
+            rect.height <= 92;
+        })
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return ar.height * ar.width - br.height * br.width;
+        });
+      for (const rowElement of detailActionRows) {
+        const likeActions = Array.from(rowElement.querySelectorAll('button, [role="button"], a, div, span, svg, use'))
+          .filter((element) => visible(element) && isLikeAction(element) && !looksLiked(element) && !isOrangeLike(element))
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.width * ar.height - br.width * br.height || ar.left - br.left;
+          });
+        for (const action of likeActions) {
+          if (await clickPrecise(action, rowElement)) return true;
+        }
+        const row = rowElement.getBoundingClientRect();
+        const fallbackPoints = [
+          [row.left + row.width * 0.50, row.top + row.height / 2],
+          [row.left + row.width * 0.53, row.top + row.height / 2],
+          [row.left + row.width * 0.56, row.top + row.height / 2]
+        ];
+        for (const [x, y] of fallbackPoints) {
+          if (clickPoint(x, y)) {
+            await new Promise((resolve) => setTimeout(resolve, 900));
+            if (didLike(rowElement)) return true;
+          }
+        }
+      }
+      const postCards = Array.from(document.querySelectorAll('article, main > div, div'))
+        .filter((element) => {
+          if (!visible(element)) return false;
+          const value = text(element.textContent || '');
+          const target = compact(targetContent).slice(0, 36);
+          const rect = element.getBoundingClientRect();
+          if (target && !compact(value).includes(target)) return false;
+          return value.includes('\\u8f6c\\u53d1') &&
+            value.includes('\\u8bc4\\u8bba') &&
+            rect.top >= 0 &&
+            rect.top < Math.min(window.innerHeight * 0.55, 420) &&
+            rect.width >= 420 &&
+            rect.height >= 120 &&
+            rect.height <= Math.max(window.innerHeight * 0.9, 520);
+        })
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return ar.height * ar.width - br.height * br.width;
+        });
+      for (const card of postCards) {
+        const cardRect = card.getBoundingClientRect();
+        const actionTexts = Array.from(card.querySelectorAll('div, footer, section'))
+          .filter((element) => {
+            if (!visible(element)) return false;
+            const value = text(element.textContent || '');
+            const rect = element.getBoundingClientRect();
+            return value.includes('\\u8f6c\\u53d1') &&
+              value.includes('\\u8bc4\\u8bba') &&
+              rect.top > cardRect.top + cardRect.height * 0.35 &&
+              rect.bottom <= cardRect.bottom + 12 &&
+              rect.width >= cardRect.width * 0.55 &&
+              rect.height >= 28 &&
+              rect.height <= 100;
+          })
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.height * ar.width - br.height * br.width;
+          });
+        for (const rowElement of actionTexts) {
+          const row = rowElement.getBoundingClientRect();
+          const commentNodes = Array.from(rowElement.querySelectorAll('button, [role="button"], a, div, span, svg, use'))
+            .filter((element) => visible(element) && text(element.textContent || element.getAttribute('aria-label') || element.getAttribute('title') || '').includes('\\u8bc4\\u8bba'))
+            .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+          const commentRect = commentNodes[0]?.getBoundingClientRect();
+          const y = commentRect ? commentRect.top + commentRect.height / 2 : row.top + row.height / 2;
+          const xFromComment = commentRect ? commentRect.right + Math.min(180, row.width * 0.22) : row.left + row.width * 0.55;
+          const points = [
+            [xFromComment, y],
+            [row.left + row.width * 0.56, y],
+            [row.left + row.width * 0.60, y],
+            [row.left + row.width * 0.64, y]
+          ];
+          for (const [x, yPoint] of points) {
+            if (x > row.left && x < row.right && clickPoint(x, yPoint)) {
+              await new Promise((resolve) => setTimeout(resolve, 900));
+              if (didLike(rowElement)) return true;
+            }
+          }
+        }
+        const actionRows = Array.from(card.querySelectorAll('div, footer, section'))
+          .filter((element) => {
+            if (!visible(element)) return false;
+            const value = text(element.textContent || '');
+            const rect = element.getBoundingClientRect();
+            return value.includes('\\u8f6c\\u53d1') &&
+              value.includes('\\u8bc4\\u8bba') &&
+              rect.top > cardRect.top + cardRect.height * 0.45 &&
+              rect.bottom <= cardRect.bottom + 4 &&
+              rect.width >= cardRect.width * 0.5 &&
+              rect.height >= 28 &&
+              rect.height <= 90;
+          })
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.height * ar.width - br.height * br.width;
+          });
+        for (const rowElement of actionRows) {
+          const row = rowElement.getBoundingClientRect();
+          const thirds = Array.from(rowElement.children).filter((element) => visible(element));
+          const rightChild = thirds.length >= 3 ? thirds[thirds.length - 1] : null;
+          if (rightChild && await clickPrecise(rightChild, rowElement)) return true;
+          const target = document.elementFromPoint(row.left + row.width * 0.84, row.top + row.height / 2)?.closest('button, [role="button"], a, div, span, svg, use');
+          if (target && rowElement.contains(target) && await clickPrecise(target, rowElement)) return true;
+        }
+        const actions = Array.from(card.querySelectorAll('button, [role="button"], a, div, span, svg, use'))
+          .filter((element) => {
+            if (!visible(element) || looksLiked(element)) return false;
+            const rect = element.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            return centerY > cardRect.top + cardRect.height * 0.45 &&
+              centerY < cardRect.bottom - 4 &&
+              centerX > cardRect.left + cardRect.width * 0.62 &&
+              centerX < cardRect.right - 4 &&
+              rect.width <= 160 &&
+              rect.height <= 80;
+          })
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return br.left - ar.left || br.top - ar.top;
+          });
+        for (const action of actions) {
+          if ((isLikeAction(action) || actions.indexOf(action) < 3) && await clickPrecise(action, card)) return true;
+        }
+        const probePoints = [
+          [cardRect.left + cardRect.width * 0.82, cardRect.bottom - 34],
+          [cardRect.left + cardRect.width * 0.84, cardRect.bottom - 28],
+          [cardRect.right - 120, cardRect.bottom - 34]
+        ];
+        for (const [x, y] of probePoints) {
+          const target = document.elementFromPoint(x, y)?.closest('button, [role="button"], a, div, span, svg, use');
+          if (target && card.contains(target) && await clickPrecise(target, card)) return true;
+        }
+      }
+      return false;
+    })()
+  `)) as boolean;
+}
+
+async function likeFirstLevelCommentInWindow(window: BrowserWindow, commentContent: string): Promise<boolean> {
+  return (await window.webContents.executeJavaScript(`
+    (() => {
+      const targetContent = ${JSON.stringify(commentContent)};
+      const normalize = (value) => (value || '').replace(/\\s+/g, '').trim();
+      const target = normalize(targetContent).slice(0, 36);
+      if (!target) return false;
+      const visible = (element) => {
+        if (!element || !(element instanceof Element)) return false;
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const clickElement = (element) => {
+        const targetElement = element.closest?.('button, [role="button"], a, div, span') || element;
+        if (!visible(targetElement)) return false;
+        const rect = targetElement.getBoundingClientRect();
+        const options = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+        targetElement.dispatchEvent(new MouseEvent('mouseover', options));
+        targetElement.dispatchEvent(new MouseEvent('mousedown', options));
+        targetElement.dispatchEvent(new MouseEvent('mouseup', options));
+        targetElement.dispatchEvent(new MouseEvent('click', options));
+        return true;
+      };
+      const textOf = (element) => normalize(element.textContent || element.getAttribute('aria-label') || element.getAttribute('title') || element.innerHTML || '');
+      const rows = Array.from(document.querySelectorAll('article, li, div'))
+        .filter((element) => {
+          if (!visible(element)) return false;
+          const text = normalize(element.textContent || '');
+          const rect = element.getBoundingClientRect();
+          return text.includes(target) && rect.top > 120 && rect.width >= 260 && rect.height >= 34 && rect.height <= 260;
+        })
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return ar.height * ar.width - br.height * br.width;
+        });
+      for (const rowElement of rows) {
+        rowElement.scrollIntoView({ block: 'center', inline: 'nearest' });
+        const row = rowElement.getBoundingClientRect();
+        const actions = Array.from(rowElement.querySelectorAll('button, [role="button"], a, div, span, svg, use'))
+          .filter((element) => {
+            if (!visible(element)) return false;
+            const rect = element.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            const value = textOf(element);
+            if (value.includes('\\u8bc4\\u8bba') || value.includes('\\u56de\\u590d') || value.includes('\\u5220\\u9664')) return false;
+            return centerY >= row.top - 8 && centerY <= row.bottom + 28 && centerX > row.left + row.width * 0.58 && centerX < row.right + 12 && rect.width <= 90 && rect.height <= 80;
+          })
+          .sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left);
+        for (const action of actions) {
+          if (clickElement(action)) return true;
+        }
+      }
+      return false;
+    })()
+  `)) as boolean;
+}
+
+async function openPrimaryCommentEditorInWindow(window: BrowserWindow): Promise<boolean> {
+  return (await window.webContents.executeJavaScript(`
+    (async () => {
+      const text = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+      const visible = (element) => {
+        if (!element || !(element instanceof Element)) return false;
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const hasEditor = () => Array.from(document.querySelectorAll('textarea, [contenteditable="true"]'))
+        .some((element) => {
+          if (!visible(element)) return false;
+          const placeholder = element.getAttribute('placeholder') || '';
+          const aria = element.getAttribute('aria-label') || '';
+          return /\\u8bc4\\u8bba|\\u56de\\u590d|\\u8bf4\\u70b9\\u4ec0\\u4e48/.test(placeholder + aria) ||
+            text(element.textContent || '').includes('\\u53d1\\u5e03\\u4f60\\u7684\\u8bc4\\u8bba');
+        });
+      if (hasEditor()) return true;
+      const clickElement = (element) => {
+        const target = element?.closest?.('button, [role="button"], a, div, span') || element;
+        if (!target || !visible(target)) return false;
+        const rect = target.getBoundingClientRect();
+        const options = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+        target.dispatchEvent(new MouseEvent('mouseover', options));
+        target.dispatchEvent(new MouseEvent('mousedown', options));
+        target.dispatchEvent(new MouseEvent('mouseup', options));
+        target.dispatchEvent(new MouseEvent('click', options));
+        return true;
+      };
+      const isCommentAction = (element) => {
+        const value = text(element.textContent || element.getAttribute('aria-label') || element.getAttribute('title') || '');
+        return value === '\\u8bc4\\u8bba' || value.includes('\\u8bc4\\u8bba');
+      };
+      const actionRows = Array.from(document.querySelectorAll('div, footer, section'))
+        .filter((element) => {
+          if (!visible(element)) return false;
+          const value = text(element.textContent || '');
+          const rect = element.getBoundingClientRect();
+          return value.includes('\\u8f6c\\u53d1') &&
+            value.includes('\\u8bc4\\u8bba') &&
+            (value.includes('\\u8d5e') || value.includes('\\u5206\\u4eab') || /\\b\\d+\\b/.test(value)) &&
+            rect.top > 220 &&
+            rect.top < Math.min(window.innerHeight * 0.72, 600) &&
+            rect.width >= 520 &&
+            rect.height >= 34 &&
+            rect.height <= 96;
+        })
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return ar.height * ar.width - br.height * br.width;
+        });
+      for (const rowElement of actionRows) {
+        const commentAction = Array.from(rowElement.querySelectorAll('button, [role="button"], a, div, span, svg, use'))
+          .filter((element) => visible(element) && isCommentAction(element))
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.width * ar.height - br.width * br.height || ar.left - br.left;
+          })[0];
+        if (commentAction && clickElement(commentAction)) {
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          if (hasEditor()) return true;
+        }
+        const row = rowElement.getBoundingClientRect();
+        const points = [
+          [row.left + row.width * 0.30, row.top + row.height / 2],
+          [row.left + row.width * 0.34, row.top + row.height / 2],
+          [row.left + row.width * 0.38, row.top + row.height / 2]
+        ];
+        for (const [x, y] of points) {
+          const target = document.elementFromPoint(x, y)?.closest('button, [role="button"], a, div, span, svg, use');
+          if (target && rowElement.contains(target) && clickElement(target)) {
+            await new Promise((resolve) => setTimeout(resolve, 1200));
+            if (hasEditor()) return true;
+          }
+        }
+      }
+      return hasEditor();
+    })()
+  `)) as boolean;
+}
+
 async function commentInBrowser(payload: AutoCommentPayload, db: AppDatabase): Promise<AutoCommentResult> {
   const partition = db.getPartition(payload.accountId);
   const commentWindow = new BrowserWindow({
@@ -548,7 +1343,16 @@ async function commentInBrowser(payload: AutoCommentPayload, db: AppDatabase): P
     commentWindow.loadURL(payload.weiboUrl);
     await waitForLoad(commentWindow);
     await delay(2500);
-    await submitCommentInWindow(commentWindow, payload.content, payload.replyToContent || null);
+    if (payload.replyToContent) {
+      try {
+        await submitCommentInWindowV2(commentWindow, payload.content, payload.replyToContent);
+      } catch (error) {
+        await submitCommentInWindow(commentWindow, payload.content, payload.replyToContent);
+      }
+    } else {
+      await submitCommentInWindow(commentWindow, payload.content, null);
+    }
+    await delay(1200);
     return { taskId: payload.taskId, status: 'success', errorMessage: null };
   } catch (error) {
     return {
@@ -577,6 +1381,7 @@ async function publishInBrowser(payload: AutoPublishPayload, db: AppDatabase): P
       sandbox: true
     }
   });
+  let shouldCloseWindow = true;
   try {
     postWindow.loadURL(WEIBO_HOME_URL);
     await waitForLoad(postWindow);
@@ -604,6 +1409,7 @@ async function publishInBrowser(payload: AutoPublishPayload, db: AppDatabase): P
       })()
     `);
     await setUploadFiles(postWindow, payload.images);
+    await delay(800);
     const clicked = (await postWindow.webContents.executeJavaScript(`
       (() => {
         const text = (value) => (value || '').replace(/\\s+/g, ' ').trim();
@@ -615,6 +1421,10 @@ async function publishInBrowser(payload: AutoPublishPayload, db: AppDatabase): P
           return value === '发送' || value === '发布';
         });
         if (!sendButton) return false;
+        const rect = sendButton.getBoundingClientRect();
+        const options = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+        sendButton.dispatchEvent(new MouseEvent('mousedown', options));
+        sendButton.dispatchEvent(new MouseEvent('mouseup', options));
         sendButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
         return true;
       })()
@@ -623,9 +1433,14 @@ async function publishInBrowser(payload: AutoPublishPayload, db: AppDatabase): P
       throw new Error('没有找到发送按钮');
     }
     await delay(6000);
-    const weiboUrl = (await readLatestWeiboUrl(postWindow).catch(() => null)) || postWindow.webContents.getURL() || WEIBO_HOME_URL;
+    if (payload.likeAfterPublish) {
+      await likeWeiboInWindow(postWindow, payload.content).catch(() => false);
+      await delay(1200);
+    }
+    const weiboUrl = (await readLatestWeiboUrl(postWindow, payload.content).catch(() => null)) || postWindow.webContents.getURL() || WEIBO_HOME_URL;
     return { taskId: payload.taskId, status: 'success', weiboUrl, errorMessage: null };
   } catch (error) {
+    shouldCloseWindow = false;
     return {
       taskId: payload.taskId,
       status: 'failed',
@@ -633,7 +1448,7 @@ async function publishInBrowser(payload: AutoPublishPayload, db: AppDatabase): P
       errorMessage: error instanceof Error ? error.message : '自动发帖失败'
     };
   } finally {
-    if (!postWindow.isDestroyed()) {
+    if (shouldCloseWindow && !postWindow.isDestroyed()) {
       postWindow.close();
     }
   }
@@ -694,7 +1509,8 @@ async function autoPublishPostTask(taskId: number, db: AppDatabase): Promise<Aut
         taskId,
         accountId: task.account_id,
         content: task.content,
-        images
+        images,
+        likeAfterPublish: Boolean(task.auto_comment_enabled && task.comment_content)
       },
       db
     );

@@ -130,6 +130,10 @@ export interface CommentTask {
 export interface CreatePostPayload {
   accountIds: number[];
   content: string;
+  accountContents?: Array<{
+    accountId: number;
+    content: string;
+  }>;
   topics: string[];
   images: string[];
   autoCommentEnabled: boolean;
